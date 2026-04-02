@@ -1,12 +1,15 @@
 from flask import Flask, request, jsonify, session, send_from_directory
 from flask_cors import CORS
-import anthropic, json, os, hashlib
+import anthropic
+import json
+import os
+import hashlib
 from datetime import datetime
 from pathlib import Path
 
 app = Flask(__name__, static_folder="static")
 app.secret_key = os.urandom(32)
-CORS(app, supports_credentials=True)
+CORS(app, supports_credentials=True, origins="*")   # Important for Render
 
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
@@ -18,6 +21,7 @@ USERS = {
 def get_client():
     key = os.getenv("ANTHROPIC_API_KEY")
     if not key:
+        print("ERROR: ANTHROPIC_API_KEY environment variable is missing!")
         return None
     return anthropic.Anthropic(api_key=key)
 
@@ -25,41 +29,34 @@ def hash_pw(pw):
     return hashlib.sha256(pw.encode()).hexdigest()
 
 def memory_path(username):
-    return DATA_DIR / (username + "_memory.json")
+    return DATA_DIR / f"{username}_memory.json"
 
 def load_memory(username):
     p = memory_path(username)
     if p.exists():
         try:
-            return json.loads(p.read_text())
+            return json.loads(p.read_text(encoding="utf-8"))
         except:
             pass
-    return {
-        "user_name": username,
-        "facts": [],
-        "preferences": {},
-        "notes": [],
-        "conversation_summaries": [],
-        "custom_shortcuts": {},
-        "research_topics": [],
-        "chat_history": []
-    }
+    return {"user_name": username, "facts": [], "notes": [], "preferences": {}, "research_topics": [], "chat_history": []}
 
 def save_memory(username, mem):
     mem["last_seen"] = datetime.now().isoformat()
-    memory_path(username).write_text(json.dumps(mem, indent=2))
+    memory_path(username).write_text(json.dumps(mem, indent=2, ensure_ascii=False))
 
 @app.route("/api/login", methods=["POST"])
 def login():
-    data = request.json
+    data = request.get_json(silent=True) or {}
     username = data.get("username", "").strip().lower()
     password = data.get("password", "")
+
     if USERS.get(username) == hash_pw(password):
         session["user"] = username
         mem = load_memory(username)
         save_memory(username, mem)
         return jsonify({"success": True, "message": "Welcome back, FRIDAY is online."})
-    return jsonify({"success": False, "message": "Invalid login"}), 401
+    
+    return jsonify({"success": False, "message": "Invalid username or password."}), 401
 
 @app.route("/api/logout", methods=["POST"])
 def logout():
@@ -74,23 +71,29 @@ def me():
 def chat():
     if "user" not in session:
         return jsonify({"error": "Not logged in"}), 401
-    username = session["user"]
-    data = request.json
+
+    data = request.get_json(silent=True) or {}
     message = data.get("message", "").strip()
+    if not message:
+        return jsonify({"error": "Empty message"}), 400
 
     client = get_client()
     if not client:
-        return jsonify({"reply": "API key not set. Contact admin."})
+        return jsonify({"reply": "Anthropic API key is not configured on the server."})
 
-    mem = load_memory(username)
-    response = client.messages.create(
-        model="claude-3-5-sonnet-20241022",
-        max_tokens=700,
-        system="You are FRIDAY, a helpful and witty AI assistant.",
-        messages=[{"role": "user", "content": message}]
-    )
-    reply = response.content[0].text
-    return jsonify({"reply": reply, "agent_commands": []})
+    try:
+        response = client.messages.create(
+            model="claude-3-5-sonnet-20241022",
+            max_tokens=700,
+            temperature=0.7,
+            system="You are FRIDAY, a witty and helpful AI assistant inspired by Iron Man.",
+            messages=[{"role": "user", "content": message}]
+        )
+        reply = response.content[0].text
+        return jsonify({"reply": reply, "agent_commands": []})
+    except Exception as e:
+        print(f"Claude error: {e}")
+        return jsonify({"reply": "Sorry, I had trouble connecting to my brain. Please try again."})
 
 @app.route("/api/memory", methods=["GET"])
 def get_memory():
